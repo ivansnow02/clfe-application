@@ -1,0 +1,46 @@
+# Python virtual environments
+.venv/
+.venv_*/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Output and temporary files
+output/
+*.pkl
+*.pt
+*.pth
+*.ckpt
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large model files
+*.bin
+*.safetensors
+
+# Jupyter
+*.ipynb_checkpoints/

@@ -8,3 +8,12 @@ wheels/
 
 # Virtual environments
 .venv
+*.ipynb
+*.mp4
+# Output and temporary files
+output/
+*.pkl
+*.pt
+*.pth
+*.ckpt
+data/

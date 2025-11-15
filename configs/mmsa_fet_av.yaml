@@ -1,0 +1,32 @@
+audio:
+  tool: opensmile
+  sample_rate: 16000
+  args:
+    feature_set: eGeMAPSv02  # 注意大小写
+    feature_level: LowLevelDescriptors
+    start: null
+    end: null
+
+video:
+  tool: openface
+  fps: 25  # SIMS使用25fps
+  multiFace:
+    enable: false
+    device: cpu
+    facedetScale: 0.25
+    minTrack: 10
+    numFailedDet: 10
+    minFaceSize: 1
+    cropScale: 0.4
+  average_over: 1
+  args:
+    hogalign: false
+    simalign: false
+    nobadaligned: false
+    landmark_2D: true      # 68个2D landmarks
+    landmark_3D: false
+    pdmparams: false
+    head_pose: true        # 启用head_pose (6维): 171 + 6 = 177
+    action_units: true     # 17个action units
+    gaze: false            # 不启用gaze
+    tracked: false
