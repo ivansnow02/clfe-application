@@ -1,0 +1,63 @@
+# 三模态特征提取配置文件：音频 + 视频 + 语言
+
+# ==================== 音频特征 ====================
+audio:
+  tool: opensmile
+  sample_rate: 16000
+  args:
+    feature_set: eGeMAPSv02
+    feature_level: LowLevelDescriptors
+    start: null
+    end: null
+
+# ==================== 视频特征 ====================
+video:
+  tool: openface
+  fps: 25
+  multiFace:
+    enable: false
+    device: cpu
+    facedetScale: 0.25
+    minTrack: 10
+    numFailedDet: 10
+    minFaceSize: 1
+    cropScale: 0.4
+  average_over: 1
+  args:
+    hogalign: false
+    simalign: false
+    nobadaligned: false
+    landmark_2D: true
+    landmark_3D: false
+    pdmparams: false
+    head_pose: true
+    action_units: true
+    gaze: false
+    tracked: false
+
+# ==================== 语言特征 ====================
+language:
+  # Whisper 配置
+  whisper:
+    model: small              # 可选: tiny/base/small/medium/large-v2
+    language: zh              # 语言代码，zh表示中文
+    temperature: 0.0          # 0表示贪心解码，不采样
+
+  # 翻译配置（当字幕非中文时触发）
+  translation:
+    enable: true              # 是否启用自动翻译
+    model: Helsinki-NLP/opus-mt-en-zh  # 英文→中文翻译模型
+    chunk_size: 400           # 文本分块大小（token数）
+
+  # BERT 语言编码器配置
+  encoder:
+    model: bert-base-chinese  # 中文BERT模型
+    pooling: cls              # 池化方式: cls 或 mean
+    max_length: 512           # 最大token长度
+    device: auto              # auto/cuda/cpu，auto自动检测GPU
+
+  # 输出配置
+  output:
+    save_transcript: true     # 是否保存文本字幕
+    save_segments: true       # 是否保存分段信息
+    save_embedding: true      # 是否保存BERT向量

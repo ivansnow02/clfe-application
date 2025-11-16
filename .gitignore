@@ -17,3 +17,7 @@ output/
 *.pth
 *.ckpt
 data/
+.cache/
+ckpt/
+log/
+notebook_configs/
