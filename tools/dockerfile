@@ -1,65 +1,73 @@
-FROM ubuntu:20.04
+FROM python:3.10-bullseye
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 替换为阿里云镜像源
-RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+# 设置 apt 为清华源
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
+    sed -i 's|security.debian.org|mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list
 
-# 基本工具和系统依赖(使用系统自带的 Python 3.8)
-RUN apt-get update && apt-get install -y \
-    software-properties-common \
-    ffmpeg \
-    libopenblas-dev \
-    libboost-all-dev \
-    python3 python3-venv python3-dev python3-pip \
-    git curl wget \
-    libgtk2.0-dev pkg-config libavcodec-dev libavformat-dev libswscale-dev \
-    libtbb2 libtbb-dev libjpeg-dev libpng-dev libtiff-dev libdc1394-22-dev \
-    && rm -rf /var/lib/apt/lists/*
+# 设置 pip 为清华源
+RUN mkdir -p /root/.pip && \
+    echo "[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple" > /root/.pip/pip.conf
 
-# 安装 OpenCV 4.1.0 (OpenFace 需要的版本)
-RUN apt-get update && apt-get install -y \
-    cmake build-essential unzip \
-    && cd /tmp \
-    && wget -q https://github.com/opencv/opencv/archive/4.1.0.zip -O opencv.zip \
-    && unzip opencv.zip \
-    && cd opencv-4.1.0 \
-    && mkdir build && cd build \
-    && cmake -D CMAKE_BUILD_TYPE=Release \
-             -D CMAKE_INSTALL_PREFIX=/usr/local \
-             -D BUILD_TESTS=OFF \
-             -D BUILD_PERF_TESTS=OFF \
-             -D BUILD_EXAMPLES=OFF \
-             -D WITH_TBB=ON \
-             -D WITH_V4L=ON \
-             .. \
-    && make -j$(nproc) \
-    && make install \
-    && ldconfig \
-    && cd / && rm -rf /tmp/opencv* \
-    && apt-get remove -y cmake build-essential wget unzip \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y ffmpeg git curl wget build-essential cmake unzip \
+    libopenblas-dev libboost-all-dev libgtk2.0-dev pkg-config \
+    libavcodec-dev libavformat-dev libswscale-dev \
+    libtbb2 libtbb-dev libjpeg-dev libpng-dev libtiff-dev libdc1394-22-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# Ubuntu 20.04 自带 Python 3.8，足够运行 MMSA-FET
-RUN ln -sf /usr/bin/python3 /usr/bin/python
+# 编译安装 OpenCV 4.1.0
+RUN cd /tmp && \
+    wget -q https://github.com/opencv/opencv/archive/4.1.0.tar.gz && \
+    tar -xzf 4.1.0.tar.gz && \
+    cd opencv-4.1.0 && \
+    mkdir build && cd build && \
+    cmake -D CMAKE_BUILD_TYPE=RELEASE \
+          -D CMAKE_INSTALL_PREFIX=/usr/local \
+          -D WITH_TBB=ON \
+          -D WITH_FFMPEG=ON \
+          -D BUILD_opencv_python2=OFF \
+          -D BUILD_opencv_python3=OFF \
+          -D BUILD_TESTS=OFF \
+          -D BUILD_PERF_TESTS=OFF \
+          -D BUILD_EXAMPLES=OFF \
+          -D BUILD_DOCS=OFF .. && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    cd /tmp && rm -rf opencv-4.1.0 4.1.0.tar.gz
+
+# 编译安装 Boost 1.71.0（OpenFace 依赖的版本）
+RUN cd /tmp && \
+    wget --progress=dot:mega https://archives.boost.io/release/1.71.0/source/boost_1_71_0.tar.gz && \
+    tar -xzf boost_1_71_0.tar.gz && \
+    cd boost_1_71_0 && \
+    ./bootstrap.sh --prefix=/usr/local --with-libraries=filesystem,system,thread && \
+    ./b2 -j$(nproc) install && \
+    ldconfig && \
+    cd /tmp && rm -rf boost_1_71_0 boost_1_71_0.tar.gz
 
 WORKDIR /workspace
 
-# 拷贝当前项目代码进容器
+# Python 依赖（使用阿里云 PyTorch wheels）
+RUN python -m pip install --upgrade pip && \
+    pip install torch==2.9.1 torchvision torchaudio -f https://mirrors.aliyun.com/pytorch-wheels/cu128 && \
+    pip install "numpy<2" scikit-learn einops transformers tensorboardX pyyaml sentencepiece && \
+    pip install accelerate && \
+    pip install MMSA-FET fastapi "uvicorn[standard]" python-multipart
+
+# 复制代码
 COPY . /workspace
 
-# Python 依赖（CPU 版），使用清华镜像源
-RUN python -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
-    pip install "numpy<2" scikit-learn einops transformers tensorboardX pyyaml sentencepiece -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install openai-whisper -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install MMSA-FET -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 设置 HuggingFace 镜像
+ENV HF_ENDPOINT=https://hf-mirror.com
 
-# 预下载 MMSA-FET 的模型和资源（失败也不中断）
-RUN python -m MSA_FET install || true
 
-# 预下载 Whisper 中文模型和 BERT 模型（可选，节省后续首次运行时间）
-RUN python -c "import whisper; whisper.load_model('small')" && \
-    python -c "from transformers import AutoModel, AutoTokenizer; AutoTokenizer.from_pretrained('bert-base-chinese'); AutoModel.from_pretrained('bert-base-chinese')" || true
+RUN python -m MSA_FET install;
+
+# 预下载 Whisper 和 BERT 模型（可选）
+RUN python -c "from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq; AutoProcessor.from_pretrained('openai/whisper-small'); AutoModelForSpeechSeq2Seq.from_pretrained('openai/whisper-small')" && \
+    python -c "from transformers import AutoModel, AutoTokenizer; AutoTokenizer.from_pretrained('bert-base-chinese'); AutoModel.from_pretrained('bert-base-chinese')"
+
+EXPOSE 8000

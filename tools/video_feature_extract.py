@@ -4,9 +4,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
-import whisper
+from transformers import (
+    AutoModel,
+    AutoTokenizer,
+    pipeline,
+    AutoProcessor,
+    AutoModelForSpeechSeq2Seq,
+)
 from MSA_FET import FeatureExtractionTool
-from transformers import AutoModel, AutoTokenizer, pipeline
 
 
 _TEXT_ENCODER_CACHE: Dict[str, Tuple[Any, Any]] = {}
@@ -62,9 +67,44 @@ def _get_device() -> str:
 
 
 def _load_whisper(model_name: str):
+    """加载 Hugging Face Whisper 模型"""
     if model_name not in _WHISPER_CACHE:
-        print(f"[INFO] Loading Whisper model: {model_name}")
-        _WHISPER_CACHE[model_name] = whisper.load_model(model_name)
+        print(f"[INFO] Loading Whisper model from Hugging Face: {model_name}")
+        device_str = "cuda" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.float16 if device_str == "cuda" else torch.float32
+
+        # 映射 openai-whisper 风格名称到 HF 模型
+        hf_model_map = {
+            "tiny": "openai/whisper-tiny",
+            "base": "openai/whisper-base",
+            "small": "openai/whisper-small",
+            "medium": "openai/whisper-medium",
+            "large": "openai/whisper-large-v2",
+            "large-v2": "openai/whisper-large-v2",
+            "large-v3": "openai/whisper-large-v3",
+        }
+        hf_model_id = hf_model_map.get(model_name, model_name)
+
+        processor = AutoProcessor.from_pretrained(hf_model_id)
+        model = AutoModelForSpeechSeq2Seq.from_pretrained(
+            hf_model_id,
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+        ).to(device_str)
+
+        # transformers pipeline 约定：device=-1 表示 CPU，非负整数表示 GPU 编号
+        pipe_device = 0 if device_str == "cuda" else -1
+
+        _WHISPER_CACHE[model_name] = {
+            "pipe": pipeline(
+                "automatic-speech-recognition",
+                model=model,
+                tokenizer=processor.tokenizer,
+                feature_extractor=processor.feature_extractor,
+                device=pipe_device,
+            ),
+            "processor": processor,
+        }
     return _WHISPER_CACHE[model_name]
 
 
@@ -74,23 +114,74 @@ def _transcribe_with_whisper(
     language: str,
     temperature: float = 0.0,
 ) -> Tuple[str, List[Dict[str, float]]]:
-    model = _load_whisper(model_name)
-    result = model.transcribe(
-        str(video_path),
-        language=language,
-        task="transcribe",
-        temperature=temperature,
-        verbose=False,
-    )
-    text = (result.get("text") or "").strip()
-    segments = []
-    for seg in result.get("segments", []):
-        segments.append({
-            "id": seg.get("id"),
-            "start": seg.get("start"),
-            "end": seg.get("end"),
-            "text": (seg.get("text") or "").strip(),
-        })
+    import subprocess
+    import tempfile
+    import os
+
+    whisper_obj = _load_whisper(model_name)
+    pipe = whisper_obj["pipe"]
+
+    # HF Whisper pipeline 不接受 mp4 扩展名，需要提取音频为 wav
+    audio_path = None
+    try:
+        # 创建临时 wav 文件
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
+            audio_path = tmp_audio.name
+
+        # 使用 ffmpeg 提取音频（16kHz 单声道，Whisper 标准）
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-vn",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                "-f",
+                "wav",
+                audio_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # 使用 HF pipeline 进行转写
+        result = pipe(
+            audio_path,
+            generate_kwargs={
+                "language": language,
+                "task": "transcribe",
+            },
+            return_timestamps=True,
+        )
+
+        text = (result.get("text") or "").strip()
+        segments = []
+
+        # HF pipeline 返回的 chunks 格式
+        for idx, chunk in enumerate(result.get("chunks", [])):
+            segments.append({
+                "id": idx,
+                "start": chunk.get("timestamp", [0, 0])[0]
+                if chunk.get("timestamp")
+                else 0,
+                "end": chunk.get("timestamp", [0, 0])[1]
+                if chunk.get("timestamp")
+                else 0,
+                "text": (chunk.get("text") or "").strip(),
+            })
+
+        return text, segments
+
+    finally:
+        # 清理临时音频文件
+        if audio_path and os.path.exists(audio_path):
+            os.unlink(audio_path)
+
     return text, segments
 
 
@@ -178,9 +269,42 @@ def extract_single_video(
     skip_language: bool = False,
 ):
     """Extract multimodal features with language from config or CLI overrides."""
-    video_path_path = Path(video_path)
+    feature = extract_features_dict(
+        video_path=video_path,
+        config_path=config_path,
+        transcript_path=transcript_path,
+        whisper_model=whisper_model,
+        transcript_language=transcript_language,
+        ensure_chinese=ensure_chinese,
+        translator_model=translator_model,
+        bert_model=bert_model,
+        pooling=pooling,
+        max_length=max_length,
+        skip_language=skip_language,
+    )
     out_path_path = Path(out_path)
     out_path_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path_path.open("wb") as f:
+        pickle.dump(feature, f, protocol=pickle.HIGHEST_PROTOCOL)
+    print("[INFO] Extraction done. Keys in feature dict:", feature.keys())
+    print(f"[INFO] Saved features to: {out_path_path}")
+
+
+def extract_features_dict(
+    video_path: str,
+    config_path: str,
+    transcript_path: Optional[str] = None,
+    whisper_model: Optional[str] = None,
+    transcript_language: Optional[str] = None,
+    ensure_chinese: Optional[bool] = None,
+    translator_model: Optional[str] = None,
+    bert_model: Optional[str] = None,
+    pooling: Optional[str] = None,
+    max_length: Optional[int] = None,
+    skip_language: bool = False,
+) -> Dict[str, Any]:
+    """Extract multimodal features and return the feature dict (no file IO)."""
+    video_path_path = Path(video_path)
 
     config = load_config(config_path)
 
@@ -207,67 +331,71 @@ def extract_single_video(
     feature = fet.run_single(str(video_path_path))
 
     if not skip_language:
-        device = lang_config.get("device", "auto")
-        if device == "auto":
-            device = _get_device()
+        try:
+            device = lang_config.get("device", "auto")
+            if device == "auto":
+                device = _get_device()
 
-        transcript, segments = _transcribe_with_whisper(
-            video_path_path,
-            lang_config["whisper_model"],
-            lang_config["transcript_language"],
-        )
-        normalized_text = transcript
-        translator_used = None
-
-        if (
-            lang_config["enable_translation"]
-            and normalized_text
-            and not _contains_chinese(normalized_text)
-        ):
-            normalized_text, translator_used = _translate_to_chinese(
-                normalized_text, lang_config["translator_model"], device
+            transcript, segments = _transcribe_with_whisper(
+                video_path_path,
+                lang_config["whisper_model"],
+                lang_config["transcript_language"],
             )
+            normalized_text = transcript
+            translator_used = None
 
-        if transcript_path:
-            transcript_file = Path(transcript_path)
-            transcript_file.parent.mkdir(parents=True, exist_ok=True)
-            transcript_file.write_text(normalized_text or "", encoding="utf-8")
-            print(f"[INFO] Saved transcript to: {transcript_file}")
+            if (
+                lang_config["enable_translation"]
+                and normalized_text
+                and not _contains_chinese(normalized_text)
+            ):
+                normalized_text, translator_used = _translate_to_chinese(
+                    normalized_text, lang_config["translator_model"], device
+                )
 
-        if normalized_text:
-            embedding = _compute_language_embedding(
-                normalized_text,
-                model_name=lang_config["bert_model"],
-                pooling=lang_config["pooling"],
-                device=device,
-                max_length=lang_config["max_length"],
+            if transcript_path:
+                transcript_file = Path(transcript_path)
+                transcript_file.parent.mkdir(parents=True, exist_ok=True)
+                transcript_file.write_text(normalized_text or "", encoding="utf-8")
+                print(f"[INFO] Saved transcript to: {transcript_file}")
+
+            if normalized_text:
+                embedding = _compute_language_embedding(
+                    normalized_text,
+                    model_name=lang_config["bert_model"],
+                    pooling=lang_config["pooling"],
+                    device=device,
+                    max_length=lang_config["max_length"],
+                )
+                feature["language"] = {
+                    "transcript": normalized_text,
+                    "raw_transcript": transcript,
+                    "segments": segments,
+                    "whisper": {
+                        "model": lang_config["whisper_model"],
+                        "language": lang_config["transcript_language"],
+                    },
+                    "encoder": {
+                        "model": lang_config["bert_model"],
+                        "pooling": lang_config["pooling"],
+                        "max_length": lang_config["max_length"],
+                        "embedding": embedding,
+                    },
+                }
+                if translator_used:
+                    feature["language"]["translator"] = translator_used
+            else:
+                print("[WARN] Transcript is empty. Skipping language embedding.")
+        except Exception:
+            import traceback
+
+            print(
+                "[WARN] Language extraction failed, continuing with audio/video only:\n"
+                + traceback.format_exc()
             )
-            feature["language"] = {
-                "transcript": normalized_text,
-                "raw_transcript": transcript,
-                "segments": segments,
-                "whisper": {
-                    "model": lang_config["whisper_model"],
-                    "language": lang_config["transcript_language"],
-                },
-                "encoder": {
-                    "model": lang_config["bert_model"],
-                    "pooling": lang_config["pooling"],
-                    "max_length": lang_config["max_length"],
-                    "embedding": embedding,
-                },
-            }
-            if translator_used:
-                feature["language"]["translator"] = translator_used
-        else:
-            print("[WARN] Transcript is empty. Skipping language embedding.")
 
     print("[INFO] Extraction done. Keys in feature dict:", feature.keys())
-
-    with out_path_path.open("wb") as f:
-        pickle.dump(feature, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-    print(f"[INFO] Saved features to: {out_path_path}")
+    return feature
 
 
 def main():
