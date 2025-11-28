@@ -21,3 +21,4 @@ data/
 ckpt/
 log/
 notebook_configs/
+.idea/

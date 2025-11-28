@@ -18,6 +18,7 @@ def load_trained_model(config_path: str, ckpt_path: str, device: torch.device):
     state_dict = ckpt.get("state_dict", ckpt)
     model.load_state_dict(state_dict)
     model.eval()
+    
     return model, args
 
 
