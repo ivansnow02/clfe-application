@@ -39,11 +39,7 @@ nvidia-smi
 
 查看输出中的 `CUDA Version`，选择对应的 PyTorch CUDA 版本。
 
-### 2. 检查 CUDA 版本
 
-```bash
-nvidia-smi
-```
 
 查看输出中的 `CUDA Version`，选择对应的 PyTorch CUDA 版本。
 
