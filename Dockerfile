@@ -38,9 +38,7 @@ ENV CLFE_CONFIG=configs/sims.yaml \
     CLFE_CKPT=ckpt/best_binary_epoch_5.pth \
     API_PORT=8001 \
     HF_ENDPOINT=https://hf-mirror.com \
-    TRANSFORMERS_CACHE=/models \
-    TOOLS_SERVER=http://localhost:8000 \
-    MAX_CONCURRENT_TASKS=1
+    TRANSFORMERS_CACHE=/models 
 
 EXPOSE 8001
 

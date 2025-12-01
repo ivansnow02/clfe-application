@@ -36,6 +36,7 @@ services:
       - ./ckpt:/app/ckpt
     environment:
       - TOOLS_SERVER=http://clfe-fet-api:8000
+      - MAX_CONCURRENT_TASKS=2 # 这是限制并发任务数，根据显存大小调整
     networks:
       - clfe-net
     deploy:
