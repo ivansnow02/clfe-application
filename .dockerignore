@@ -1,0 +1,12 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.DS_Store
+.venv
+log/
+output/
+data/
+# 如果 ckpt 很大且不需要打包进镜像，可以取消注释下面这行
+ckpt/
+tools/dockerfile

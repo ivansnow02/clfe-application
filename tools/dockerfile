@@ -1,30 +1,29 @@
-FROM python:3.10-bullseye
-
+# Stage 1: Builder
+FROM python:3.10-bullseye AS builder
+ARG CUDA_VERSION=cu128
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 设置 apt 为清华源
-RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list && \
-    sed -i 's|security.debian.org|mirrors.tuna.tsinghua.edu.cn/debian-security|g' /etc/apt/sources.list
+# 换源（中科大）
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list && \
+    sed -i 's|security.debian.org|mirrors.ustc.edu.cn/debian-security|g' /etc/apt/sources.list
 
-# 设置 pip 为清华源
-RUN mkdir -p /root/.pip && \
-    echo "[global]\nindex-url = https://pypi.tuna.tsinghua.edu.cn/simple" > /root/.pip/pip.conf
-
+# 安装编译依赖 (合并命令减少层数)
 RUN apt-get update && \
-    apt-get install -y ffmpeg git curl wget build-essential cmake unzip \
+    apt-get install -y --no-install-recommends \
+    ffmpeg git curl wget build-essential cmake unzip \
     libopenblas-dev libboost-all-dev libgtk2.0-dev pkg-config \
     libavcodec-dev libavformat-dev libswscale-dev \
     libtbb2 libtbb-dev libjpeg-dev libpng-dev libtiff-dev libdc1394-22-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# 编译安装 OpenCV 4.1.0
-RUN cd /tmp && \
-    wget -q https://github.com/opencv/opencv/archive/4.1.0.tar.gz && \
+# 1. 编译安装 OpenCV (安装到 /opt/opencv 以便分离)
+WORKDIR /tmp
+RUN wget -q https://github.com/opencv/opencv/archive/4.1.0.tar.gz && \
     tar -xzf 4.1.0.tar.gz && \
     cd opencv-4.1.0 && \
     mkdir build && cd build && \
     cmake -D CMAKE_BUILD_TYPE=RELEASE \
-          -D CMAKE_INSTALL_PREFIX=/usr/local \
+          -D CMAKE_INSTALL_PREFIX=/opt/opencv \
           -D WITH_TBB=ON \
           -D WITH_FFMPEG=ON \
           -D BUILD_opencv_python2=OFF \
@@ -34,40 +33,90 @@ RUN cd /tmp && \
           -D BUILD_EXAMPLES=OFF \
           -D BUILD_DOCS=OFF .. && \
     make -j$(nproc) && \
-    make install && \
-    ldconfig && \
-    cd /tmp && rm -rf opencv-4.1.0 4.1.0.tar.gz
+    make install
 
-# 编译安装 Boost 1.71.0（OpenFace 依赖的版本）
+# 2. 编译安装 Boost (安装到 /opt/boost)
 RUN cd /tmp && \
     wget --progress=dot:mega https://archives.boost.io/release/1.71.0/source/boost_1_71_0.tar.gz && \
     tar -xzf boost_1_71_0.tar.gz && \
     cd boost_1_71_0 && \
-    ./bootstrap.sh --prefix=/usr/local --with-libraries=filesystem,system,thread && \
-    ./b2 -j$(nproc) install && \
-    ldconfig && \
-    cd /tmp && rm -rf boost_1_71_0 boost_1_71_0.tar.gz
+    ./bootstrap.sh --prefix=/opt/boost --with-libraries=filesystem,system,thread && \
+    ./b2 -j$(nproc) install
+
+# 3. 创建 Python 虚拟环境并安装依赖
+# 使用 venv 可以让我们在第二阶段只拷贝 /opt/venv，极其干净
+ENV PATH="/opt/venv/bin:$PATH"
+RUN python -m venv /opt/venv
+
+# 升级 pip 并配置源（中科大）
+RUN pip install --upgrade pip && \
+    pip config set global.index-url https://pypi.mirrors.ustc.edu.cn/simple
+
+# 安装 PyTorch
+# 注意：如果你只需要推理且服务器没有 GPU，或者想极致压缩，
+# 考虑使用 --extra-index-url https://download.pytorch.org/whl/cpu 安装 CPU 版本
+RUN pip install --no-cache-dir torch==2.9.1 torchvision torchaudio -f https://mirrors.aliyun.com/pytorch-wheels/${CUDA_VERSION}
+
+# 安装其他依赖
+RUN pip install --no-cache-dir "numpy<2" scikit-learn einops transformers tensorboardX pyyaml sentencepiece accelerate MMSA-FET fastapi "uvicorn[standard]" python-multipart
+
+# 执行 MSA_FET install (确保它安装在 venv 里)
+RUN python -m MSA_FET install
+
+# 处理模型 (建议：不要放在 .cache，而是下载到固定目录)
+ENV HF_ENDPOINT=https://hf-mirror.com
+ENV TRANSFORMERS_CACHE=/models
+# 创建一个专门存放模型的目录
+RUN mkdir -p /models
+# # 如果你需要预下载模型，请指定 cache_dir 到 /models，例如：
+# RUN python -c "from transformers import AutoProcessor; AutoProcessor.from_pretrained('openai/whisper-small', cache_dir='/models')"
+
+# Stage 2: Runtime
+FROM python:3.10-slim-bullseye
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV HF_ENDPOINT=https://hf-mirror.com
+ENV TRANSFORMERS_CACHE=/models
+# 将虚拟环境加入 PATH，这样直接输入 python 就是 venv 里的 python
+ENV PATH="/opt/venv/bin:$PATH"
+# 设置动态库路径，包含我们要拷贝的 opencv 和 boost
+ENV LD_LIBRARY_PATH="/opt/opencv/lib:/opt/boost/lib"
+
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list && \
+    sed -i 's|security.debian.org|mirrors.ustc.edu.cn/debian-security|g' /etc/apt/sources.list
+
+# 安装运行时系统依赖 (去除 dev 包)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ffmpeg libtbb2 libopenblas-base libgtk2.0-0 \
+    libavcodec58 libavformat58 libswscale5 \
+    libjpeg62-turbo libpng16-16 libtiff5 \
+    libgomp1 libopenexr25 && \
+    rm -rf /var/lib/apt/lists/*
+
+# 1. 拷贝 Python 虚拟环境 (包含所有 pip 包)
+COPY --from=builder /opt/venv /opt/venv
+
+# 2. 拷贝编译好的库 (只拷贝 lib，不拷贝 include 和 bin)
+# 注意：OpenCV 有时库在 lib64 下，视编译情况而定，通常是 lib
+COPY --from=builder /opt/opencv/lib /opt/opencv/lib
+COPY --from=builder /opt/boost/lib /opt/boost/lib
+
+# 3. 拷贝模型 (如果有预下载)
+COPY --from=builder /models /models
+
+# 4. 更新动态库缓存 (虽然设置了 LD_LIBRARY_PATH，但 ldconfig 也是好习惯)
+RUN echo "/opt/opencv/lib" > /etc/ld.so.conf.d/opencv.conf && \
+    echo "/opt/boost/lib" > /etc/ld.so.conf.d/boost.conf && \
+    ldconfig
 
 WORKDIR /workspace
-
-# Python 依赖（使用阿里云 PyTorch wheels）
-RUN python -m pip install --upgrade pip && \
-    pip install torch==2.9.1 torchvision torchaudio -f https://mirrors.aliyun.com/pytorch-wheels/cu128 && \
-    pip install "numpy<2" scikit-learn einops transformers tensorboardX pyyaml sentencepiece && \
-    pip install accelerate && \
-    pip install MMSA-FET fastapi "uvicorn[standard]" python-multipart
 
 # 复制代码
 COPY . /workspace
 
-# 设置 HuggingFace 镜像
-ENV HF_ENDPOINT=https://hf-mirror.com
-
-
-RUN python -m MSA_FET install;
-
-# 预下载 Whisper 和 BERT 模型（可选）
-RUN python -c "from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq; AutoProcessor.from_pretrained('openai/whisper-small'); AutoModelForSpeechSeq2Seq.from_pretrained('openai/whisper-small')" && \
-    python -c "from transformers import AutoModel, AutoTokenizer; AutoTokenizer.from_pretrained('bert-base-chinese'); AutoModel.from_pretrained('bert-base-chinese')"
+WORKDIR /workspace
 
 EXPOSE 8000
+
+CMD ["python", "api_server.py"]

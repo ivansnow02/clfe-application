@@ -1,0 +1,53 @@
+services:
+  clfe-fet-api:
+    build:
+      context: ./tools
+      dockerfile: dockerfile
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-cu128}
+    image: clfe-fet-api:${CUDA_VERSION:-cu128}
+    container_name: clfe-fet-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./.cache/huggingface/transformers:/models
+    networks:
+      - clfe-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  clfe-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-cu128}
+    image: clfe:${CUDA_VERSION:-cu128}
+    container_name: clfe-service
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./.cache/huggingface/transformers:/models
+      - ./ckpt:/app/ckpt
+    environment:
+      - TOOLS_SERVER=http://clfe-fet-api:8000
+    networks:
+      - clfe-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      - clfe-fet-api
+
+networks:
+  clfe-net:
+    driver: bridge

@@ -8,6 +8,11 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel
 
+# Ensure we can import from the same directory
+import sys
+
+sys.path.append(str(Path(__file__).parent))
+
 from video_feature_extract import extract_features_dict
 
 app = FastAPI(title="CLFE Feature Extraction Service", version="1.0")
@@ -176,3 +181,9 @@ async def extract_npz(
         # 清理临时文件
         if temp_video_path and Path(temp_video_path).exists():
             Path(temp_video_path).unlink()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
